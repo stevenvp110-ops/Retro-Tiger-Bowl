@@ -1,316 +1,248 @@
-<!doctype html>
+<!DOCTYPE html>
 <html>
 <head>
-  <meta charset="utf-8"/>
-  <title>Clemson vs Gamecocks Retro Bowl</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <style>
-    html, body { margin: 0; height: 100%; background: #111; color: #fff; font-family: monospace; }
-    #gameWrap { display: flex; flex-direction: column; align-items: center; padding: 12px; }
-    canvas { background: #006400; image-rendering: pixelated; border: 4px solid #222; }
-    #ui { margin-top: 12px; }
-    button { padding: 8px 12px; margin: 0 6px; background: #222; color: #fff; border: 1px solid #444; cursor: pointer; }
-    #log { height: 120px; overflow: auto; background: #0b0b0b; padding: 6px; border-radius: 4px; border: 1px solid #222; font-size: 12px; }
-    .small { font-size: 14px; opacity: 0.9; }
-  </style>
+<meta charset="UTF-8">
+<title>Tiger Bowl Enhanced</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  body { margin:0; background:#004000; font-family: monospace; color:white; }
+  canvas { background:#006400; display:block; margin:auto; border:4px solid #222; }
+  #ui { text-align:center; margin-top:10px; }
+  #log { width: 80%; margin: 0 auto; height:140px; background:#0b0b0b; overflow:auto; padding:5px; border-radius:4px; border:1px solid #222; font-size:12px;}
+  button { padding:6px 12px; margin:5px; background:#222; color:white; border:1px solid #444; cursor:pointer;}
+  .small { font-size:14px; opacity:0.9; }
+</style>
 </head>
 <body>
-  <div id="gameWrap">
-    <canvas id="field" width="600" height="300"></canvas>
-    <div id="ui">
-      <div><strong>Call a Play:</strong></div>
-      <div>
-        <button id="btnRun">Run</button>
-        <button id="btnPass">Pass</button>
-      </div>
-      <div class="small" style="margin-top:8px;">Arrow keys to move on runs.</div>
-      <div style="margin-top:12px;"><strong>Game Log:</strong></div>
-      <div id="log"></div>
-    </div>
-  </div>
+<canvas id="field" width="900" height="500"></canvas>
+<div id="ui">
+  <button id="runBtn">Run</button>
+  <button id="passBtn">Pass</button>
+  <div class="small">Arrow keys move receiver after snap. Click & drag QB to throw ball.</div>
+  <div id="log"></div>
+</div>
 
-  <script>
-  // --- Config
-  const config = { fieldWidth: 100, yardsToPixels: 5, playTime: 10, fps: 60 };
+<script>
+// ---------------- CONFIG ----------------
+const FIELD_YARDS = 100;
+const PIXELS_PER_YARD = 7.5;
+const FIELD_HEIGHT = 500;
+const FIELD_WIDTH = 900;
+const logEl = document.getElementById('log');
+function log(msg){ logEl.innerHTML = "<div>"+msg+"</div>"+logEl.innerHTML; }
 
-  const logEl = document.getElementById('log');
-  function log(msg) { logEl.innerHTML = `<div>${msg}</div>` + logEl.innerHTML; }
+// ---------------- TEAMS -----------------
+const TEAM_HOME = "Clemson Tigers";
+const TEAM_AWAY = "South Carolina Gamecocks";
+const roster = {
+  home: {QB:"Cade Klubnik", RB:"Adam Randall", WR1:"Chase Byrd", WR2:"Sam Earle", LB:"Barrett Carter", CB:"Shelton Lewis"},
+  away: {QB:"Brandon Cunningham", RB:"Rahsul Faison", WR1:"Mazeo Bennett Jr.", WR2:"LaNorris Sellers", LB:"Fred Johnson", CB:"DQ Smith"}
+};
 
-  // --- Team names and roster
-  const TEAM_HOME = "Clemson Tigers";
-  const TEAM_AWAY = "South Carolina Gamecocks";
-  const roster = {
-    home: {
-      QB: "Cade Klubnik",
-      RB: "Adam Randall",
-      WR1: "Chase Byrd",
-      WR2: "Sam Earle",
-      LB: "Barrett Carter",
-      CB: "Shelton Lewis"
-    },
-    away: {
-      QB: "Brandon Cunningham",
-      RB: "Rahsul Faison",
-      WR1: "Mazeo Bennett Jr.",
-      WR2: "LaNorris Sellers",
-      LB: "Fred “JayR” Johnson",
-      CB: "DQ Smith"
+// ---------------- GAME STATE ------------
+let G = {
+  possession:'home', down:1, toGo:10, ballYard:25,
+  inPlay:false, playType:null,
+  score:{home:0,away:0},
+  ball:{x:0,y:0,carrier:null,moving:false,vx:0,vy:0},
+  keys:{}, receiver:null
+};
+
+const canvas = document.getElementById('field');
+const ctx = canvas.getContext('2d');
+const runBtn = document.getElementById('runBtn');
+const passBtn = document.getElementById('passBtn');
+
+runBtn.onclick = ()=> callPlay('run');
+passBtn.onclick = ()=> callPlay('pass');
+window.addEventListener('keydown', e=>G.keys[e.key]=true);
+window.addEventListener('keyup', e=>G.keys[e.key]=false);
+
+// ---------------- ENTITIES ----------------
+class Entity{
+  constructor(x,y,team,color,size=14){this.x=x; this.y=y; this.vx=0; this.vy=0; this.team=team; this.color=color; this.size=size; this.speed=120; this.anim=0;}
+  step(dt){ this.x+=this.vx*dt; this.y+=this.vy*dt; this.anim=(this.anim+dt*10)%2; }
+  draw(){ ctx.fillStyle=this.color; ctx.fillRect(this.x-this.size/2,this.y-this.size/2,this.size,this.size); }
+}
+
+let players = [];
+let dragStart={x:0,y:0};
+let dragging=false;
+
+function yardToX(y){ return 50 + y*PIXELS_PER_YARD; }
+function xToYard(x){ return (x-50)/PIXELS_PER_YARD; }
+
+function resetPlayers(){
+  players=[];
+  const midY=FIELD_HEIGHT/2;
+  const baseX=yardToX(G.ballYard);
+
+  // HOME offense
+  const homeQB = new Entity(baseX-60,midY,'home','orange');
+  const homeRB = new Entity(baseX-90,midY+30,'home','yellow');
+  const homeWR1 = new Entity(baseX-60,midY-50,'home','white');
+  const homeWR2 = new Entity(baseX-60,midY+70,'home','white');
+  players.push({role:'QB',team:'home',ent:homeQB});
+  players.push({role:'RB',team:'home',ent:homeRB});
+  players.push({role:'WR1',team:'home',ent:homeWR1});
+  players.push({role:'WR2',team:'home',ent:homeWR2});
+
+  // AWAY defenders
+  const awayLB = new Entity(baseX+40,midY+20,'away','red');
+  const awayCB = new Entity(baseX+40,midY-20,'away','red');
+  players.push({role:'LB',team:'away',ent:awayLB});
+  players.push({role:'CB',team:'away',ent:awayCB});
+
+  // Ball on QB
+  G.ball.carrier=homeQB;
+  G.ball.x=homeQB.x; G.ball.y=homeQB.y;
+  G.ball.moving=false;
+
+  G.receiver=homeWR1;
+}
+
+// ---------------- PLAY LOGIC ----------------
+function aiStep(dt){
+  players.forEach(p=>{
+    const e=p.ent;
+    if(p.team==='away'){
+      const dx=G.ball.x-e.x;
+      const dy=G.ball.y-e.y;
+      const dist=Math.hypot(dx,dy)||1;
+      e.vx=dx/dist*e.speed; e.vy=dy/dist*e.speed;
     }
-  };
+  });
+}
 
-  // --- Game State
-  let G = {
-    possession: 'home',
-    down: 1,
-    toGo: 10,
-    ballYard: 25,
-    clock: 10*60,
-    score: { home: 0, away: 0 },
-    inPlay: false,
-    playType: null
-  };
-
-  // Entities
-  let players = [];
-  let ball = { x: 0, y: 0, carrier: null, moving: false, vx: 0, vy: 0 };
-
-  const canvas = document.getElementById('field');
-  const ctx = canvas.getContext('2d');
-  const btnRun = document.getElementById('btnRun');
-  const btnPass = document.getElementById('btnPass');
-
-  btnRun.onclick = ()=> callPlay('run');
-  btnPass.onclick = ()=> callPlay('pass');
-
-  window.addEventListener('keydown', e => keys[e.key] = true);
-  window.addEventListener('keyup', e => keys[e.key] = false);
-  const keys = {};
-
-  function yardToX(y) {
-    const margin = 30;
-    const w = canvas.width - margin*2;
-    return margin + (y / config.fieldWidth) * w;
-  }
-  function xToYard(x) {
-    const margin = 30;
-    const w = canvas.width - margin*2;
-    const rel = (x - margin) / w;
-    return rel * config.fieldWidth;
-  }
-
-  class Entity {
-    constructor(x, y, team, color, size=10) {
-      this.x = x; this.y = y; this.vx = 0; this.vy = 0;
-      this.team = team; this.color = color; this.size = size; this.speed = 80;
-    }
-    step(dt) {
-      this.x += this.vx * dt;
-      this.y += this.vy * dt;
-    }
-    draw() {
-      ctx.fillStyle = this.color;
-      ctx.fillRect(this.x - this.size/2, this.y - this.size/2, this.size, this.size);
-    }
-  }
-
-  function resetPlayers() {
-    players = [];
-    const midY = canvas.height / 2;
-    const baseX = yardToX(G.ballYard);
-    // Home offense: orange, away: garnet
-
-    // Home QB
-    players.push({ role: 'QB', team: 'home', ent: new Entity(baseX - 40, midY, 'home', 'orange') });
-    // Home RB
-    players.push({ role: 'RB', team: 'home', ent: new Entity(baseX - 60, midY + 30, 'home', 'yellow') });
-    // Home WRs
-    players.push({ role: 'WR1', team: 'home', ent: new Entity(baseX - 40, midY - 40, 'home', 'white') });
-    players.push({ role: 'WR2', team: 'home', ent: new Entity(baseX - 40, midY + 40, 'home', 'white') });
-
-    // Away defenders / offense
-    players.push({ role: 'QB', team: 'away', ent: new Entity(baseX + 40, midY, 'away', 'garnet') });
-    players.push({ role: 'RB', team: 'away', ent: new Entity(baseX + 60, midY + 30, 'away', 'pink') });
-    players.push({ role: 'WR1', team: 'away', ent: new Entity(baseX + 40, midY - 40, 'away', 'white') });
-    players.push({ role: 'WR2', team: 'away', ent: new Entity(baseX + 40, midY + 40, 'away', 'white') });
-
-    // Simple defense: one LB and one CB each
-    players.push({ role: 'LB', team: 'away', ent: new Entity(baseX + 30, midY + 10, 'away', 'red') });
-    players.push({ role: 'CB', team: 'away', ent: new Entity(baseX + 30, midY - 10, 'away', 'red') });
-
-    // Place ball at QB of possession
-    const qb = players.find(p => p.team === G.possession && p.role === 'QB').ent;
-    ball.carrier = qb;
-    ball.x = qb.x; ball.y = qb.y;
-    ball.moving = false;
-  }
-
-  function aiStep(dt) {
-    players.forEach(p => {
-      const e = p.ent;
-      if (p.team === 'away') {
-        // chase ball
-        const tx = ball.x;
-        const ty = ball.y;
-        const dx = tx - e.x, dy = ty - e.y;
-        const d = Math.hypot(dx, dy) || 1;
-        e.vx = (dx / d) * e.speed;
-        e.vy = (dy / d) * e.speed;
-      } else {
-        // offense WRs just run forward
-        if (p.role.startsWith('WR')) {
-          e.vx = 40;
-        } else {
-          e.vx = 0;
-        }
+function detectTackle(){
+  if(G.ball.carrier){
+    const c=G.ball.carrier;
+    players.filter(p=>p.team!==G.possession).forEach(d=>{
+      const e=d.ent;
+      if(Math.hypot(e.x-c.x,e.y-c.y)<14){
+        log("Tackle by "+d.role+"!");
+        endPlay();
       }
     });
-  }
-
-  function detectTackle() {
-    if (ball.carrier) {
-      const c = ball.carrier;
-      players.filter(p => p.team !== G.possession).forEach(d => {
-        const e = d.ent;
-        if (Math.hypot(e.x - c.x, e.y - c.y) < 12) {
-          log("Tackle by " + d.role + "!");
-          endPlay();
-        }
-      });
-      // touchdown
-      const yard = xToYard(c.x);
-      if (yard >= config.fieldWidth) {
-        log("Touchdown " + (G.possession === 'home' ? TEAM_HOME : TEAM_AWAY) + "!");
-        scoreTD();
-      }
+    if(xToYard(c.x)>=FIELD_YARDS){
+      log("Touchdown "+(G.possession==='home'?TEAM_HOME:TEAM_AWAY)+"!");
+      scoreTD();
     }
   }
+}
 
-  function callPlay(type) {
-    if (G.inPlay) return;
-    G.inPlay = true;
-    G.playType = type;
-    resetPlayers();
-    log("Play: " + type.toUpperCase());
-    if (type === 'run') {
-      const rb = players.find(p => p.role === 'RB' && p.team === G.possession).ent;
-      ball.carrier = rb;
-    } else {
-      // pass: after delay, throw to a WR
-      setTimeout(() => {
-        const wrs = players.filter(p => p.role.startsWith('WR') && p.team === G.possession);
-        const target = wrs[Math.floor(Math.random() * wrs.length)].ent;
-        ball.carrier = null;
-        ball.moving = true;
-        const dx = target.x - ball.x;
-        const dy = target.y - ball.y;
-        const dist = Math.hypot(dx, dy);
-        ball.vx = (dx / dist) * 300;
-        ball.vy = (dy / dist) * 300;
-        log("Pass thrown to " + target === wrs[0] ? roster[G.possession].WR1 : roster[G.possession].WR2);
-      }, 700);
-    }
-  }
-
-  function endPlay() {
-    G.inPlay = false;
-    // update ball yard
-    const yard = xToYard(ball.x);
-    const gain = yard - G.ballYard;
-    G.ballYard = Math.max(0, Math.min(config.fieldWidth, yard));
-    log("Gain: " + Math.round(gain) + " yards");
-    // simple downs logic
-    if (gain >= G.toGo) {
-      G.down = 1;
-      G.toGo = 10;
-      log("First down!");
-    } else {
-      G.down++;
-      if (G.down > 4) {
-        log("Turnover on downs!");
-        turnover();
-        return;
-      } else {
-        G.toGo = Math.max(1, G.toGo - gain);
-      }
-    }
-    // switch possession randomly for demo
-    G.possession = G.possession === 'home' ? 'away' : 'home';
-    resetPlayers();
-  }
-
-  function scoreTD() {
-    G.score[G.possession] += 6;
-    G.inPlay = false;
-    log("Extra point good!");
-    G.score[G.possession] += 1;
-    G.possession = G.possession === 'home' ? 'away' : 'home';
-    G.ballYard = 25;
-    resetPlayers();
-  }
-
-  function turnover() {
-    G.possession = G.possession === 'home' ? 'away' : 'home';
-    G.down = 1;
-    G.toGo = 10;
-    G.ballYard = 100 - G.ballYard;
-    resetPlayers();
-  }
-
-  let last = performance.now();
-  function tick() {
-    const now = performance.now();
-    const dt = (now - last) / 1000;
-    last = now;
-
-    if (G.inPlay) {
-      aiStep(dt);
-      players.forEach(p => p.ent.step(dt));
-      if (ball.moving) {
-        ball.x += ball.vx * dt;
-        ball.y += ball.vy * dt;
-      } else if (ball.carrier) {
-        ball.x = ball.carrier.x;
-        ball.y = ball.carrier.y;
-      }
-      detectTackle();
-    }
-
-    // draw
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    // field lines
-    ctx.strokeStyle = "#2e8b57";
-    for (let i = 0; i <= config.fieldWidth; i += 10) {
-      const x = yardToX(i);
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, canvas.height);
-      ctx.stroke();
-    }
-    // draw players
-    players.forEach(p => p.ent.draw());
-    // draw ball
-    if (ball.carrier || ball.moving) {
-      ctx.fillStyle = "orange";
-      ctx.beginPath();
-      ctx.arc(ball.x, ball.y, 6, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    // draw scoreboard
-    ctx.fillStyle = "white";
-    ctx.font = "16px monospace";
-    ctx.fillText(`${TEAM_HOME}: ${G.score.home}`, 10, 20);
-    ctx.fillText(`${TEAM_AWAY}: ${G.score.away}`, 10, 40);
-    ctx.fillText(`Down: ${G.down}  ToGo: ${Math.round(G.toGo)}`, 10, 60);
-    ctx.fillText(`Ball at: ${Math.round(G.ballYard)}`, 10, 80);
-
-    requestAnimationFrame(tick);
-  }
-
+// ---------------- CALL PLAY ----------------
+function callPlay(type){
+  if(G.inPlay) return;
+  G.inPlay=true; G.playType=type;
   resetPlayers();
-  tick();
+  log("Play: "+type.toUpperCase());
+  if(type==='run'){
+    const rb=players.find(p=>p.role==='RB').ent;
+    G.ball.carrier=rb;
+  } else {
+    // PASS play
+    G.ball.carrier=players.find(p=>p.role==='QB').ent;
+    canvas.addEventListener('mousedown', startDrag);
+  }
+}
 
-  log("Welcome to " + TEAM_HOME + " vs " + TEAM_AWAY + " retro game!");
-  </script>
+// ------------- DRAG TO PASS ----------------
+function startDrag(e){
+  dragging=true;
+  dragStart={x:e.offsetX,y:e.offsetY};
+  canvas.addEventListener('mouseup', endDrag);
+}
+
+function endDrag(e){
+  dragging=false;
+  const dx=e.offsetX-dragStart.x;
+  const dy=e.offsetY-dragStart.y;
+  G.ball.vx=dx*3; G.ball.vy=dy*3;
+  G.ball.moving=true;
+  G.ball.carrier=null;
+  log("Pass thrown!");
+  canvas.removeEventListener('mouseup',endDrag);
+}
+
+// ---------------- END PLAY ----------------
+function endPlay(){
+  G.inPlay=false;
+  const yard=xToYard(G.ball.x);
+  const gain=yard-G.ballYard;
+  G.ballYard=Math.max(0,Math.min(FIELD_YARDS,yard));
+  log("Gain: "+Math.round(gain)+" yards");
+  if(gain>=G.toGo){G.down=1;G.toGo=10;log("First down!");} 
+  else {G.down++; if(G.down>4){log("Turnover!"); turnover(); return;} else G.toGo=Math.max(1,G.toGo-gain);}
+  G.possession=G.possession==='home'?'away':'home';
+  resetPlayers();
+}
+
+function scoreTD(){
+  G.score[G.possession]+=6;
+  G.inPlay=false;
+  G.score[G.possession]+=1; // extra point
+  G.possession=G.possession==='home'?'away':'home';
+  G.ballYard=25;
+  resetPlayers();
+}
+
+function turnover(){
+  G.possession=G.possession==='home'?'away':'home';
+  G.down=1;G.toGo=10;G.ballYard=100-G.ballYard;
+  resetPlayers();
+}
+
+// ---------------- GAME LOOP ----------------
+let last=performance.now();
+function tick(){
+  const now=performance.now();
+  const dt=(now-last)/1000;
+  last=now;
+
+  if(G.inPlay){
+    aiStep(dt);
+    players.forEach(p=>p.ent.step(dt));
+    if(G.ball.moving){ G.ball.x+=G.ball.vx*dt; G.ball.y+=G.ball.vy*dt; }
+    else if(G.ball.carrier){ G.ball.x=G.ball.carrier.x; G.ball.y=G.ball.carrier.y; }
+    detectTackle();
+  }
+
+  // Receiver movement
+  if(G.receiver){
+    if(G.keys.ArrowUp) G.receiver.y-=180*dt;
+    if(G.keys.ArrowDown) G.receiver.y+=180*dt;
+    if(G.keys.ArrowLeft) G.receiver.x-=180*dt;
+    if(G.keys.ArrowRight) G.receiver.x+=180*dt;
+  }
+
+  // DRAW FIELD
+  ctx.clearRect(0,0,FIELD_WIDTH,FIELD_HEIGHT);
+  ctx.strokeStyle="#2e8b57";
+  for(let i=0;i<=FIELD_YARDS;i+=10){ const x=yardToX(i); ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,FIELD_HEIGHT); ctx.stroke();}
+  players.forEach(p=>p.ent.draw());
+
+  // DRAW BALL
+  if(G.ball.carrier||G.ball.moving){
+    ctx.fillStyle="orange";
+    ctx.beginPath();
+    ctx.arc(G.ball.x,G.ball.y,7,0,Math.PI*2);
+    ctx.fill();
+  }
+
+  // SCOREBOARD
+  ctx.fillStyle="white"; ctx.font="16px monospace";
+  ctx.fillText(`${TEAM_HOME}: ${G.score.home}`,10,20);
+  ctx.fillText(`${TEAM_AWAY}: ${G.score.away}`,10,40);
+  ctx.fillText(`Down: ${G.down}  ToGo: ${Math.round(G.toGo)}`,10,60);
+  ctx.fillText(`Ball at: ${Math.round(G.ballYard)}`,10,80);
+
+  requestAnimationFrame(tick);
+}
+
+resetPlayers();
+tick();
+log(`Welcome to ${TEAM_HOME} vs ${TEAM_AWAY} Tiger Bowl Enhanced!`);
+</script>
 </body>
 </html>
